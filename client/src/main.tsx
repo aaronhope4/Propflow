@@ -13,41 +13,83 @@ const redirectToLoginIfUnauthorized = (error: unknown) => {
   if (!(error instanceof TRPCClientError)) return;
   if (typeof window === "undefined") return;
 
-  const isUnauthorized = error.message === UNAUTHED_ERR_MSG;
+  const isUnauthorized =
+    error.message === UNAUTHED_ERR_MSG;
 
   if (!isUnauthorized) return;
 
-  // Redirect to native login page (not Manus OAuth)
   const loginPath = "/login";
+
   if (window.location.pathname !== loginPath) {
     window.location.href = loginPath;
   }
 };
 
-queryClient.getQueryCache().subscribe(event => {
-  if (event.type === "updated" && event.action.type === "error") {
+queryClient.getQueryCache().subscribe((event) => {
+  if (
+    event.type === "updated" &&
+    event.action.type === "error"
+  ) {
     const error = event.query.state.error;
+
     redirectToLoginIfUnauthorized(error);
-    console.error("[API Query Error]", error);
+
+    console.error(
+      "[API Query Error]",
+      error
+    );
   }
 });
 
-queryClient.getMutationCache().subscribe(event => {
-  if (event.type === "updated" && event.action.type === "error") {
+queryClient.getMutationCache().subscribe((event) => {
+  if (
+    event.type === "updated" &&
+    event.action.type === "error"
+  ) {
     const error = event.mutation.state.error;
+
     redirectToLoginIfUnauthorized(error);
-    console.error("[API Mutation Error]", error);
+
+    console.error(
+      "[API Mutation Error]",
+      error
+    );
   }
 });
+
+/*
+ * Local development:
+ *
+ *   /api/trpc
+ *
+ * Production:
+ *
+ *   VITE_API_URL=https://propflow-api-f7m5.onrender.com
+ *
+ * The environment variable should NOT include /api/trpc.
+ */
+const apiBaseUrl =
+  import.meta.env.VITE_API_URL?.trim() || "";
+
+const trpcUrl =
+  `${apiBaseUrl}/api/trpc`.replace(
+    /([^:]\/)\/+/g,
+    "$1"
+  );
 
 const trpcClient = trpc.createClient({
   links: [
     httpBatchLink({
-      url: "/api/trpc",
+      url: trpcUrl,
       transformer: superjson,
+
       fetch(input, init) {
         return globalThis.fetch(input, {
           ...(init ?? {}),
+
+          /*
+           * Required because authentication uses cookies.
+           */
           credentials: "include",
         });
       },
@@ -55,9 +97,16 @@ const trpcClient = trpc.createClient({
   ],
 });
 
-createRoot(document.getElementById("root")!).render(
-  <trpc.Provider client={trpcClient} queryClient={queryClient}>
-    <QueryClientProvider client={queryClient}>
+createRoot(
+  document.getElementById("root")!
+).render(
+  <trpc.Provider
+    client={trpcClient}
+    queryClient={queryClient}
+  >
+    <QueryClientProvider
+      client={queryClient}
+    >
       <App />
     </QueryClientProvider>
   </trpc.Provider>
