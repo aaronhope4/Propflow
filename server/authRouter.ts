@@ -19,9 +19,8 @@
  * - Bluehost hosted MySQL
  *
  * Important:
- * This implementation does NOT depend on MySQL insertId.
- * Newly created organizations and users are retrieved using
- * their unique slug/openId values.
+ * - Organization IDs are retrieved by unique slug instead of insertId.
+ * - User IDs for new tenant accounts are retrieved by unique openId.
  */
 
 import bcrypt from "bcryptjs";
@@ -85,8 +84,8 @@ function normalizeEmail(email: string): string {
 /**
  * Create a JWT session cookie.
  *
- * The JWT stores the user's openId. The backend later resolves the user
- * using db.getUserByOpenId().
+ * The JWT stores the user's openId.
+ * sdk.authenticateRequest() resolves the database user using openId.
  */
 async function createSessionCookie(
   openId: string,
@@ -99,17 +98,12 @@ async function createSessionCookie(
     expiresInMs: ONE_YEAR_MS,
   });
 
-  const cookieOptions =
-    getSessionCookieOptions(req);
+  const cookieOptions = getSessionCookieOptions(req);
 
-  res.cookie(
-    COOKIE_NAME,
-    token,
-    {
-      ...cookieOptions,
-      maxAge: ONE_YEAR_MS,
-    },
-  );
+  res.cookie(COOKIE_NAME, token, {
+    ...cookieOptions,
+    maxAge: ONE_YEAR_MS,
+  });
 
   return token;
 }
@@ -137,9 +131,7 @@ function sanitizeUser(user: any) {
 /**
  * Generate a unique organization slug.
  */
-function createOrganizationSlug(
-  name: string,
-): string {
+function createOrganizationSlug(name: string): string {
   const baseSlug =
     name
       .toLowerCase()
@@ -153,10 +145,13 @@ function createOrganizationSlug(
 
 /**
  * Resolve the application's base URL.
+ *
+ * Priority:
+ * 1. Frontend supplied origin
+ * 2. APP_BASE_URL
+ * 3. localhost
  */
-function getBaseUrl(
-  origin?: string,
-): string {
+function getBaseUrl(origin?: string): string {
   return (
     origin?.trim() ||
     ENV.appBaseUrl ||
@@ -212,37 +207,24 @@ export const authRouter = router({
         });
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Normalize input                                                    */
-      /* ------------------------------------------------------------------ */
-
-      const normalizedEmail =
-        normalizeEmail(input.email);
+      const normalizedEmail = normalizeEmail(input.email);
 
       const organizationName =
         input.companyName?.trim() ||
         `${input.name.trim()}'s Company`;
 
       const organizationSlug =
-        createOrganizationSlug(
-          organizationName,
-        );
+        createOrganizationSlug(organizationName);
 
-      /* ------------------------------------------------------------------ */
-      /* Check existing account                                             */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Check existing email                                                 */
+      /* -------------------------------------------------------------------- */
 
-      const existingUser =
-        await db
-          .select()
-          .from(users)
-          .where(
-            eq(
-              users.email,
-              normalizedEmail,
-            ),
-          )
-          .limit(1);
+      const existingUser = await db
+        .select()
+        .from(users)
+        .where(eq(users.email, normalizedEmail))
+        .limit(1);
 
       if (existingUser.length > 0) {
         throw new TRPCError({
@@ -252,19 +234,16 @@ export const authRouter = router({
         });
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Create organization                                                */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Create organization                                                   */
+      /* -------------------------------------------------------------------- */
 
       try {
         await db
           .insert(organizations)
           .values({
-            name:
-              organizationName,
-
-            slug:
-              organizationSlug,
+            name: organizationName,
+            slug: organizationSlug,
           });
       } catch (error) {
         console.error(
@@ -273,89 +252,65 @@ export const authRouter = router({
         );
 
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
-          message:
-            "Failed to create organization.",
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to create organization.",
         });
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Retrieve organization without insertId                             */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Retrieve organization by unique slug                                  */
+      /* -------------------------------------------------------------------- */
 
-      const organizationResult =
-        await db
-          .select()
-          .from(organizations)
-          .where(
-            eq(
-              organizations.slug,
-              organizationSlug,
-            ),
-          )
-          .limit(1);
+      const organizationResult = await db
+        .select()
+        .from(organizations)
+        .where(
+          eq(
+            organizations.slug,
+            organizationSlug,
+          ),
+        )
+        .limit(1);
 
-      const organization =
-        organizationResult[0];
+      const organization = organizationResult[0];
 
       if (!organization) {
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
+          code: "INTERNAL_SERVER_ERROR",
           message:
             "Organization was created but could not be retrieved.",
         });
       }
 
-      const orgId =
-        organization.id;
+      const orgId = organization.id;
 
-      /* ------------------------------------------------------------------ */
-      /* Hash password                                                      */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Hash password                                                         */
+      /* -------------------------------------------------------------------- */
 
-      const passwordHash =
-        await bcrypt.hash(
-          input.password,
-          SALT_ROUNDS,
-        );
+      const passwordHash = await bcrypt.hash(
+        input.password,
+        SALT_ROUNDS,
+      );
 
-      /* ------------------------------------------------------------------ */
-      /* Generate unique user OpenID                                        */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Create admin user                                                     */
+      /* -------------------------------------------------------------------- */
 
-      const openId =
-        `email_${nanoid(24)}`;
-
-      /* ------------------------------------------------------------------ */
-      /* Create admin user                                                  */
-      /* ------------------------------------------------------------------ */
+      const openId = `email_${nanoid(24)}`;
 
       try {
         await db
           .insert(users)
           .values({
             openId,
-
-            name:
-              input.name.trim(),
-
-            email:
-              normalizedEmail,
-
-            loginMethod:
-              "email",
-
-            role:
-              "admin",
-
+            name: input.name.trim(),
+            email: normalizedEmail,
+            loginMethod: "email",
+            role: "admin",
             passwordHash,
-
             orgId,
-
-            lastSignedIn:
-              new Date(),
+            lastSignedIn: new Date(),
           });
       } catch (error) {
         console.error(
@@ -364,55 +319,43 @@ export const authRouter = router({
         );
 
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
+          code: "INTERNAL_SERVER_ERROR",
           message:
             "Organization was created, but the user account could not be created.",
         });
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Retrieve created user                                              */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Retrieve created user by unique openId                                 */
+      /* -------------------------------------------------------------------- */
 
-      const createdUserResult =
-        await db
-          .select()
-          .from(users)
-          .where(
-            eq(
-              users.openId,
-              openId,
-            ),
-          )
-          .limit(1);
+      const createdUserResult = await db
+        .select()
+        .from(users)
+        .where(eq(users.openId, openId))
+        .limit(1);
 
-      const createdUser =
-        createdUserResult[0];
+      const createdUser = createdUserResult[0];
 
       if (!createdUser) {
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
+          code: "INTERNAL_SERVER_ERROR",
           message:
             "User account was created but could not be retrieved.",
         });
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Create session                                                     */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Create session                                                        */
+      /* -------------------------------------------------------------------- */
 
       try {
         await createSessionCookie(
           createdUser.openId,
-
           createdUser.name ??
             createdUser.email ??
             input.name.trim(),
-
           ctx.req,
-
           ctx.res,
         );
       } catch (error) {
@@ -422,25 +365,15 @@ export const authRouter = router({
         );
 
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
+          code: "INTERNAL_SERVER_ERROR",
           message:
             "Account was created, but the login session could not be created.",
         });
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Return                                                             */
-      /* ------------------------------------------------------------------ */
-
       return {
         success: true,
-
-        user:
-          sanitizeUser(
-            createdUser,
-          ),
-
+        user: sanitizeUser(createdUser),
         orgId,
       };
     }),
@@ -452,11 +385,8 @@ export const authRouter = router({
   login: publicProcedure
     .input(
       z.object({
-        email:
-          z.string().email(),
-
-        password:
-          z.string().min(1),
+        email: z.string().trim().email(),
+        password: z.string().min(1),
       }),
     )
     .mutation(async ({ input, ctx }) => {
@@ -464,20 +394,21 @@ export const authRouter = router({
 
       if (!db) {
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
-          message:
-            "Database unavailable.",
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Database unavailable.",
         });
       }
 
-      const normalizedEmail =
-        normalizeEmail(
-          input.email,
-        );
+      const normalizedEmail = normalizeEmail(input.email);
 
-      const result =
-        await db
+      /* -------------------------------------------------------------------- */
+      /* Query user                                                            */
+      /* -------------------------------------------------------------------- */
+
+      let result;
+
+      try {
+        result = await db
           .select()
           .from(users)
           .where(
@@ -487,70 +418,127 @@ export const authRouter = router({
             ),
           )
           .limit(1);
+      } catch (error: any) {
+        console.error(
+          "[Auth] Login database query failed:",
+          error,
+        );
 
-      const user =
-        result[0];
+        console.error(
+          "[Auth] Database error message:",
+          error?.message ?? "Unknown database error",
+        );
 
-      if (
-        !user ||
-        !user.passwordHash
-      ) {
+        console.error(
+          "[Auth] Database error code:",
+          error?.code ?? "Unknown",
+        );
+
+        console.error(
+          "[Auth] Database error errno:",
+          error?.errno ?? "Unknown",
+        );
+
+        console.error(
+          "[Auth] Database error sqlState:",
+          error?.sqlState ?? "Unknown",
+        );
+
+        console.error(
+          "[Auth] Database error sqlMessage:",
+          error?.sqlMessage ?? "Unknown",
+        );
+
+        console.error(
+          "[Auth] Database error stack:",
+          error?.stack ?? "No stack available",
+        );
+
         throw new TRPCError({
-          code:
-            "UNAUTHORIZED",
+          code: "INTERNAL_SERVER_ERROR",
           message:
-            "Invalid email or password.",
+            "Unable to access the database. Please try again later.",
         });
       }
 
-      const passwordValid =
-        await bcrypt.compare(
-          input.password,
-          user.passwordHash,
-        );
+      const user = result[0];
+
+      /* -------------------------------------------------------------------- */
+      /* Validate credentials                                                  */
+      /* -------------------------------------------------------------------- */
+
+      if (!user || !user.passwordHash) {
+        throw new TRPCError({
+          code: "UNAUTHORIZED",
+          message: "Invalid email or password.",
+        });
+      }
+
+      const passwordValid = await bcrypt.compare(
+        input.password,
+        user.passwordHash,
+      );
 
       if (!passwordValid) {
         throw new TRPCError({
-          code:
-            "UNAUTHORIZED",
-          message:
-            "Invalid email or password.",
+          code: "UNAUTHORIZED",
+          message: "Invalid email or password.",
         });
       }
 
-      await db
-        .update(users)
-        .set({
-          lastSignedIn:
-            new Date(),
-        })
-        .where(
-          eq(
-            users.id,
-            user.id,
-          ),
+      /* -------------------------------------------------------------------- */
+      /* Update sign-in time                                                   */
+      /* -------------------------------------------------------------------- */
+
+      try {
+        await db
+          .update(users)
+          .set({
+            lastSignedIn: new Date(),
+          })
+          .where(eq(users.id, user.id));
+      } catch (error) {
+        console.error(
+          "[Auth] Failed to update lastSignedIn:",
+          error,
         );
 
-      await createSessionCookie(
-        user.openId,
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message:
+            "Login succeeded, but the account could not be updated.",
+        });
+      }
 
-        user.name ??
-          user.email ??
-          "",
+      /* -------------------------------------------------------------------- */
+      /* Create session                                                        */
+      /* -------------------------------------------------------------------- */
 
-        ctx.req,
+      try {
+        await createSessionCookie(
+          user.openId,
+          user.name ??
+            user.email ??
+            "",
+          ctx.req,
+          ctx.res,
+        );
+      } catch (error) {
+        console.error(
+          "[Auth] Failed to create login session:",
+          error,
+        );
 
-        ctx.res,
-      );
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message:
+            "Login succeeded, but the session could not be created.",
+        });
+      }
 
       return {
-        success:
-          true,
-
-        user:
-          sanitizeUser(
-            user,
-          ),
+        success: true,
+        user: sanitizeUser(user),
       };
     }),
 
@@ -561,38 +549,34 @@ export const authRouter = router({
   createInvite: protectedProcedure
     .input(
       z.object({
-        tenantId:
-          z.number(),
+        tenantId: z.number(),
 
-        email:
-          z.string().email(),
+        email: z
+          .string()
+          .trim()
+          .email(),
 
-        name:
-          z
-            .string()
-            .trim()
-            .min(1)
-            .max(100),
+        name: z
+          .string()
+          .trim()
+          .min(1)
+          .max(100),
 
-        origin:
-          z.string()
-            .url()
-            .optional(),
+        origin: z
+          .string()
+          .url()
+          .optional(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
 
-      /* ------------------------------------------------------------------ */
-      /* Admin authorization                                                */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Admin authorization                                                   */
+      /* -------------------------------------------------------------------- */
 
-      if (
-        ctx.user.role !==
-        "admin"
-      ) {
+      if (ctx.user.role !== "admin") {
         throw new TRPCError({
-          code:
-            "FORBIDDEN",
+          code: "FORBIDDEN",
           message:
             "Only admins can invite tenants.",
         });
@@ -600,331 +584,231 @@ export const authRouter = router({
 
       if (!ctx.user.orgId) {
         throw new TRPCError({
-          code:
-            "FORBIDDEN",
+          code: "FORBIDDEN",
           message:
             "Your account is not associated with an organization.",
         });
       }
 
-      const db =
-        await getDb();
+      const db = await getDb();
 
       if (!db) {
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
-          message:
-            "Database unavailable.",
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Database unavailable.",
         });
       }
 
-      const normalizedEmail =
-        normalizeEmail(
-          input.email,
-        );
+      const normalizedEmail = normalizeEmail(input.email);
 
-      /* ------------------------------------------------------------------ */
-      /* Verify tenant                                                      */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Verify tenant                                                         */
+      /* -------------------------------------------------------------------- */
 
-      const tenantResult =
-        await db
-          .select()
-          .from(tenants)
-          .where(
-            eq(
-              tenants.id,
-              input.tenantId,
-            ),
-          )
-          .limit(1);
+      const tenantResult = await db
+        .select()
+        .from(tenants)
+        .where(eq(tenants.id, input.tenantId))
+        .limit(1);
 
-      const tenant =
-        tenantResult[0];
+      const tenant = tenantResult[0];
 
       if (!tenant) {
         throw new TRPCError({
-          code:
-            "NOT_FOUND",
-          message:
-            "Tenant record not found.",
+          code: "NOT_FOUND",
+          message: "Tenant record not found.",
         });
       }
 
       if (
         tenant.orgId &&
-        tenant.orgId !==
-          ctx.user.orgId
+        tenant.orgId !== ctx.user.orgId
       ) {
         throw new TRPCError({
-          code:
-            "FORBIDDEN",
+          code: "FORBIDDEN",
           message:
             "You cannot invite a tenant from another organization.",
         });
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Check existing user                                                */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Check existing user                                                   */
+      /* -------------------------------------------------------------------- */
 
-      const existingResult =
-        await db
-          .select({
-            id:
-              users.id,
+      const existingResult = await db
+        .select({
+          id: users.id,
+          inviteUsed: users.inviteUsed,
+          role: users.role,
+          orgId: users.orgId,
+        })
+        .from(users)
+        .where(eq(users.email, normalizedEmail))
+        .limit(1);
 
-            inviteUsed:
-              users.inviteUsed,
-
-            role:
-              users.role,
-
-            orgId:
-              users.orgId,
-          })
-          .from(users)
-          .where(
-            eq(
-              users.email,
-              normalizedEmail,
-            ),
-          )
-          .limit(1);
-
-      const existing =
-        existingResult[0];
+      const existing = existingResult[0];
 
       if (
         existing &&
         existing.inviteUsed &&
-        existing.role ===
-          "tenant"
+        existing.role === "tenant"
       ) {
         throw new TRPCError({
-          code:
-            "CONFLICT",
+          code: "CONFLICT",
           message:
             "A tenant account with this email already exists and is active.",
         });
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Create invitation data                                             */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Generate invitation                                                   */
+      /* -------------------------------------------------------------------- */
 
-      const inviteToken =
-        nanoid(48);
+      const inviteToken = nanoid(48);
 
-      const inviteTokenExpiry =
-        new Date(
-          Date.now() +
-            INVITE_EXPIRY_HOURS *
-              60 *
-              60 *
-              1000,
-        );
+      const inviteTokenExpiry = new Date(
+        Date.now() +
+          INVITE_EXPIRY_HOURS *
+            60 *
+            60 *
+            1000,
+      );
 
       let userId: number;
 
-      /* ------------------------------------------------------------------ */
-      /* Update existing pending account                                    */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Update existing pending account                                      */
+      /* -------------------------------------------------------------------- */
 
       if (existing) {
-
         await db
           .update(users)
           .set({
-            name:
-              input.name.trim(),
-
-            email:
-              normalizedEmail,
-
-            role:
-              "tenant",
-
-            loginMethod:
-              "invite",
-
-            orgId:
-              ctx.user.orgId,
-
+            name: input.name.trim(),
+            email: normalizedEmail,
+            role: "tenant",
+            loginMethod: "invite",
+            orgId: ctx.user.orgId,
             inviteToken,
-
             inviteTokenExpiry,
-
-            inviteUsed:
-              0,
-
-            inviteReminderSentAt:
-              null,
+            inviteUsed: 0,
+            inviteReminderSentAt: null,
           })
-          .where(
-            eq(
-              users.id,
-              existing.id,
-            ),
+          .where(eq(users.id, existing.id));
+
+        userId = existing.id;
+      } else {
+        /* ------------------------------------------------------------------ */
+        /* Create pending tenant account                                      */
+        /* ------------------------------------------------------------------ */
+
+        const openId = `tenant_${nanoid(24)}`;
+
+        try {
+          await db
+            .insert(users)
+            .values({
+              openId,
+              name: input.name.trim(),
+              email: normalizedEmail,
+              loginMethod: "invite",
+              role: "tenant",
+              orgId: ctx.user.orgId,
+              inviteToken,
+              inviteTokenExpiry,
+              inviteUsed: 0,
+              lastSignedIn: new Date(),
+              inviteReminderSentAt: null,
+            });
+        } catch (error) {
+          console.error(
+            "[Auth] Failed to create tenant user:",
+            error,
           );
 
-        userId =
-          existing.id;
-
-      } else {
-
-        /* -------------------------------------------------------------- */
-        /* Create pending tenant user                                     */
-        /* -------------------------------------------------------------- */
-
-        const openId =
-          `tenant_${nanoid(24)}`;
-
-        await db
-          .insert(users)
-          .values({
-            openId,
-
-            name:
-              input.name.trim(),
-
-            email:
-              normalizedEmail,
-
-            loginMethod:
-              "invite",
-
-            role:
-              "tenant",
-
-            orgId:
-              ctx.user.orgId,
-
-            inviteToken,
-
-            inviteTokenExpiry,
-
-            inviteUsed:
-              0,
-
-            lastSignedIn:
-              new Date(),
-
-            inviteReminderSentAt:
-              null,
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message:
+              "Failed to create tenant account.",
           });
+        }
 
-        /* -------------------------------------------------------------- */
-        /* Retrieve user by unique openId                                  */
-        /* -------------------------------------------------------------- */
+        /* ------------------------------------------------------------------ */
+        /* Retrieve user by unique openId                                     */
+        /* ------------------------------------------------------------------ */
 
-        const createdTenantUserResult =
-          await db
-            .select({
-              id:
-                users.id,
-            })
-            .from(users)
-            .where(
-              eq(
-                users.openId,
-                openId,
-              ),
-            )
-            .limit(1);
+        const createdTenantUserResult = await db
+          .select({
+            id: users.id,
+          })
+          .from(users)
+          .where(eq(users.openId, openId))
+          .limit(1);
 
         const createdTenantUser =
           createdTenantUserResult[0];
 
         if (!createdTenantUser) {
           throw new TRPCError({
-            code:
-              "INTERNAL_SERVER_ERROR",
+            code: "INTERNAL_SERVER_ERROR",
             message:
               "Tenant account was created but could not be retrieved.",
           });
         }
 
-        userId =
-          createdTenantUser.id;
+        userId = createdTenantUser.id;
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Link user to tenant                                                */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Link user to tenant                                                   */
+      /* -------------------------------------------------------------------- */
 
       await db
         .update(tenants)
         .set({
           userId,
         })
-        .where(
-          eq(
-            tenants.id,
-            input.tenantId,
-          ),
-        );
+        .where(eq(tenants.id, input.tenantId));
 
-      /* ------------------------------------------------------------------ */
-      /* Build invitation URL                                               */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Build invite URL                                                     */
+      /* -------------------------------------------------------------------- */
 
-      const baseUrl =
-        getBaseUrl(
-          input.origin,
-        );
+      const baseUrl = getBaseUrl(input.origin);
 
       const inviteUrl =
         `${baseUrl}/accept-invite?token=${encodeURIComponent(
           inviteToken,
         )}`;
 
-      /* ------------------------------------------------------------------ */
-      /* Send invitation email                                              */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Send invitation                                                      */
+      /* -------------------------------------------------------------------- */
 
       const emailResult =
         await sendInviteEmail({
-          to:
-            normalizedEmail,
-
-          tenantName:
-            input.name,
-
+          to: normalizedEmail,
+          tenantName: input.name,
           inviteUrl,
-
           expiresHours:
             INVITE_EXPIRY_HOURS,
-
           managerName:
             ctx.user.name ??
             "Your Property Manager",
         });
 
-      /* ------------------------------------------------------------------ */
-      /* Return                                                             */
-      /* ------------------------------------------------------------------ */
-
       return {
-        success:
-          true,
-
+        success: true,
         inviteToken,
-
         inviteLink:
           `/accept-invite?token=${encodeURIComponent(
             inviteToken,
           )}`,
-
         inviteUrl,
-
         expiresAt:
           inviteTokenExpiry.toISOString(),
-
         emailSent:
           emailResult.success,
-
         emailError:
           emailResult.error,
       };
@@ -937,61 +821,43 @@ export const authRouter = router({
   validateInvite: publicProcedure
     .input(
       z.object({
-        token:
-          z.string().min(1),
+        token: z.string().min(1),
       }),
     )
     .query(async ({ input }) => {
-      const db =
-        await getDb();
+      const db = await getDb();
 
       if (!db) {
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
-          message:
-            "Database unavailable.",
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Database unavailable.",
         });
       }
 
-      const result =
-        await db
-          .select({
-            id:
-              users.id,
+      const result = await db
+        .select({
+          id: users.id,
+          name: users.name,
+          email: users.email,
+          inviteTokenExpiry:
+            users.inviteTokenExpiry,
+          inviteUsed: users.inviteUsed,
+          role: users.role,
+        })
+        .from(users)
+        .where(
+          eq(
+            users.inviteToken,
+            input.token,
+          ),
+        )
+        .limit(1);
 
-            name:
-              users.name,
-
-            email:
-              users.email,
-
-            inviteTokenExpiry:
-              users.inviteTokenExpiry,
-
-            inviteUsed:
-              users.inviteUsed,
-
-            role:
-              users.role,
-          })
-          .from(users)
-          .where(
-            eq(
-              users.inviteToken,
-              input.token,
-            ),
-          )
-          .limit(1);
-
-      const user =
-        result[0];
+      const user = result[0];
 
       if (!user) {
         return {
-          valid:
-            false,
-
+          valid: false,
           reason:
             "Invite link not found or already used.",
         };
@@ -999,9 +865,7 @@ export const authRouter = router({
 
       if (user.inviteUsed) {
         return {
-          valid:
-            false,
-
+          valid: false,
           reason:
             "This invite link has already been used.",
         };
@@ -1013,23 +877,16 @@ export const authRouter = router({
           user.inviteTokenExpiry
       ) {
         return {
-          valid:
-            false,
-
+          valid: false,
           reason:
             "This invite link has expired. Please ask your property manager for a new one.",
         };
       }
 
       return {
-        valid:
-          true,
-
-        name:
-          user.name,
-
-        email:
-          user.email,
+        valid: true,
+        name: user.name,
+        email: user.email,
       };
     }),
 
@@ -1040,66 +897,55 @@ export const authRouter = router({
   acceptInvite: publicProcedure
     .input(
       z.object({
-        token:
-          z.string().min(1),
+        token: z.string().min(1),
 
-        password:
-          z.string()
-            .min(8)
-            .max(128),
+        password: z
+          .string()
+          .min(8)
+          .max(128),
 
-        name:
-          z.string()
-            .trim()
-            .min(1)
-            .max(100)
-            .optional(),
+        name: z
+          .string()
+          .trim()
+          .min(1)
+          .max(100)
+          .optional(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
-
-      const db =
-        await getDb();
+      const db = await getDb();
 
       if (!db) {
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
-          message:
-            "Database unavailable.",
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Database unavailable.",
         });
       }
 
-      const result =
-        await db
-          .select()
-          .from(users)
-          .where(
-            eq(
-              users.inviteToken,
-              input.token,
-            ),
-          )
-          .limit(1);
+      const result = await db
+        .select()
+        .from(users)
+        .where(
+          eq(
+            users.inviteToken,
+            input.token,
+          ),
+        )
+        .limit(1);
 
-      const user =
-        result[0];
+      const user = result[0];
 
       if (!user) {
         throw new TRPCError({
-          code:
-            "NOT_FOUND",
-          message:
-            "Invite not found.",
+          code: "NOT_FOUND",
+          message: "Invite not found.",
         });
       }
 
       if (user.inviteUsed) {
         throw new TRPCError({
-          code:
-            "BAD_REQUEST",
-          message:
-            "Invite already used.",
+          code: "BAD_REQUEST",
+          message: "Invite already used.",
         });
       }
 
@@ -1109,10 +955,8 @@ export const authRouter = router({
           user.inviteTokenExpiry
       ) {
         throw new TRPCError({
-          code:
-            "BAD_REQUEST",
-          message:
-            "Invite has expired.",
+          code: "BAD_REQUEST",
+          message: "Invite has expired.",
         });
       }
 
@@ -1128,95 +972,60 @@ export const authRouter = router({
         user.email ||
         "Tenant";
 
-      /* ------------------------------------------------------------------ */
-      /* Activate tenant account                                            */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Activate account                                                      */
+      /* -------------------------------------------------------------------- */
 
       await db
         .update(users)
         .set({
           passwordHash,
-
-          name:
-            updatedName,
-
-          loginMethod:
-            "email",
-
-          inviteUsed:
-            1,
-
-          inviteToken:
-            null,
-
-          inviteTokenExpiry:
-            null,
-
-          inviteReminderSentAt:
-            null,
-
-          lastSignedIn:
-            new Date(),
+          name: updatedName,
+          loginMethod: "email",
+          inviteUsed: 1,
+          inviteToken: null,
+          inviteTokenExpiry: null,
+          inviteReminderSentAt: null,
+          lastSignedIn: new Date(),
         })
-        .where(
-          eq(
-            users.id,
-            user.id,
-          ),
-        );
+        .where(eq(users.id, user.id));
 
-      /* ------------------------------------------------------------------ */
-      /* Retrieve updated user                                              */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Retrieve updated user                                                 */
+      /* -------------------------------------------------------------------- */
 
-      const updatedResult =
-        await db
-          .select()
-          .from(users)
-          .where(
-            eq(
-              users.id,
-              user.id,
-            ),
-          )
-          .limit(1);
+      const updatedResult = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, user.id))
+        .limit(1);
 
-      const updatedUser =
-        updatedResult[0];
+      const updatedUser = updatedResult[0];
 
       if (!updatedUser) {
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
+          code: "INTERNAL_SERVER_ERROR",
           message:
             "Failed to activate account.",
         });
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Create session                                                     */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Create session                                                        */
+      /* -------------------------------------------------------------------- */
 
       await createSessionCookie(
         updatedUser.openId,
-
         updatedUser.name ??
           updatedUser.email ??
           "Tenant",
-
         ctx.req,
-
         ctx.res,
       );
 
       return {
-        success:
-          true,
-
-        user:
-          sanitizeUser(
-            updatedUser,
-          ),
+        success: true,
+        user: sanitizeUser(updatedUser),
       };
     }),
 
@@ -1227,44 +1036,24 @@ export const authRouter = router({
   forgotPassword: publicProcedure
     .input(
       z.object({
-        email:
-          z.string().email(),
-
-        origin:
-          z.string()
-            .url()
-            .optional(),
+        email: z.string().email(),
+        origin: z.string().url().optional(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
-
-      /* ------------------------------------------------------------------ */
-      /* Determine client IP                                               */
-      /* ------------------------------------------------------------------ */
-
       const forwardedFor =
-        ctx.req.headers[
-          "x-forwarded-for"
-        ];
+        ctx.req.headers["x-forwarded-for"];
 
       const ip =
-        typeof forwardedFor ===
-        "string"
+        typeof forwardedFor === "string"
           ? forwardedFor
               .split(",")[0]
               .trim()
-          : ctx.req.socket
-              ?.remoteAddress ??
+          : ctx.req.socket?.remoteAddress ??
             "unknown";
 
       const normalizedEmail =
-        normalizeEmail(
-          input.email,
-        );
-
-      /* ------------------------------------------------------------------ */
-      /* IP rate limit                                                      */
-      /* ------------------------------------------------------------------ */
+        normalizeEmail(input.email);
 
       if (
         !forgotPasswordIpLimiter.check(
@@ -1277,9 +1066,7 @@ export const authRouter = router({
           );
 
         throw new TRPCError({
-          code:
-            "TOO_MANY_REQUESTS",
-
+          code: "TOO_MANY_REQUESTS",
           message:
             `Too many requests from this IP. Please try again in ${Math.ceil(
               retryAfter / 60,
@@ -1287,120 +1074,74 @@ export const authRouter = router({
         });
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Email rate limit                                                   */
-      /* ------------------------------------------------------------------ */
-
       if (
         !forgotPasswordEmailLimiter.check(
           normalizedEmail,
         )
       ) {
         return {
-          success:
-            true,
+          success: true,
         };
       }
 
-      const db =
-        await getDb();
+      const db = await getDb();
 
-      /*
-       * Deliberately fail silently so this endpoint never
-       * reveals whether an account exists.
-       */
       if (!db) {
         return {
-          success:
-            true,
+          success: true,
         };
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Find account                                                       */
-      /* ------------------------------------------------------------------ */
+      const result = await db
+        .select()
+        .from(users)
+        .where(
+          eq(
+            users.email,
+            normalizedEmail,
+          ),
+        )
+        .limit(1);
 
-      const result =
-        await db
-          .select()
-          .from(users)
-          .where(
-            eq(
-              users.email,
-              normalizedEmail,
-            ),
-          )
-          .limit(1);
-
-      const user =
-        result[0];
+      const user = result[0];
 
       if (!user) {
         return {
-          success:
-            true,
+          success: true,
         };
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Create reset token                                                 */
-      /* ------------------------------------------------------------------ */
+      const token = nanoid(48);
 
-      const token =
-        nanoid(48);
-
-      const expiry =
-        new Date(
-          Date.now() +
-            RESET_PASSWORD_EXPIRY_HOURS *
-              60 *
-              60 *
-              1000,
-        );
+      const expiry = new Date(
+        Date.now() +
+          RESET_PASSWORD_EXPIRY_HOURS *
+            60 *
+            60 *
+            1000,
+      );
 
       await db
         .update(users)
         .set({
-          resetToken:
-            token,
-
-          resetTokenExpiry:
-            expiry,
+          resetToken: token,
+          resetTokenExpiry: expiry,
         })
-        .where(
-          eq(
-            users.id,
-            user.id,
-          ),
-        );
+        .where(eq(users.id, user.id));
 
-      /* ------------------------------------------------------------------ */
-      /* Build reset URL                                                    */
-      /* ------------------------------------------------------------------ */
-
-      const baseUrl =
-        getBaseUrl(
-          input.origin,
-        );
+      const baseUrl = getBaseUrl(input.origin);
 
       const resetUrl =
         `${baseUrl}/reset-password?token=${encodeURIComponent(
           token,
         )}`;
 
-      /* ------------------------------------------------------------------ */
-      /* Send reset email                                                   */
-      /* ------------------------------------------------------------------ */
-
       try {
         await sendPasswordResetEmail({
-          to:
-            user.email as string,
-
+          to: user.email as string,
           name:
             user.name ??
             (user.email as string),
-
           resetUrl,
         });
       } catch (error) {
@@ -1411,8 +1152,7 @@ export const authRouter = router({
       }
 
       return {
-        success:
-          true,
+        success: true,
       };
     }),
 
@@ -1423,46 +1163,38 @@ export const authRouter = router({
   validateResetToken: publicProcedure
     .input(
       z.object({
-        token:
-          z.string().min(1),
+        token: z.string().min(1),
       }),
     )
     .query(async ({ input }) => {
-
-      const db =
-        await getDb();
+      const db = await getDb();
 
       if (!db) {
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
-          message:
-            "Database unavailable.",
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Database unavailable.",
         });
       }
 
-      const result =
-        await db
-          .select()
-          .from(users)
-          .where(
-            eq(
-              users.resetToken,
-              input.token,
-            ),
-          )
-          .limit(1);
+      const result = await db
+        .select()
+        .from(users)
+        .where(
+          eq(
+            users.resetToken,
+            input.token,
+          ),
+        )
+        .limit(1);
 
-      const user =
-        result[0];
+      const user = result[0];
 
       if (
         !user ||
         !user.resetTokenExpiry
       ) {
         throw new TRPCError({
-          code:
-            "NOT_FOUND",
+          code: "NOT_FOUND",
           message:
             "Invalid or expired reset link.",
         });
@@ -1475,19 +1207,15 @@ export const authRouter = router({
         )
       ) {
         throw new TRPCError({
-          code:
-            "BAD_REQUEST",
+          code: "BAD_REQUEST",
           message:
             "This reset link has expired. Please request a new one.",
         });
       }
 
       return {
-        valid:
-          true,
-
-        email:
-          user.email,
+        valid: true,
+        email: user.email,
       };
     }),
 
@@ -1498,51 +1226,43 @@ export const authRouter = router({
   resetPassword: publicProcedure
     .input(
       z.object({
-        token:
-          z.string().min(1),
+        token: z.string().min(1),
 
-        newPassword:
-          z.string()
-            .min(8)
-            .max(128),
+        newPassword: z
+          .string()
+          .min(8)
+          .max(128),
       }),
     )
     .mutation(async ({ input }) => {
-
-      const db =
-        await getDb();
+      const db = await getDb();
 
       if (!db) {
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
-          message:
-            "Database unavailable.",
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Database unavailable.",
         });
       }
 
-      const result =
-        await db
-          .select()
-          .from(users)
-          .where(
-            eq(
-              users.resetToken,
-              input.token,
-            ),
-          )
-          .limit(1);
+      const result = await db
+        .select()
+        .from(users)
+        .where(
+          eq(
+            users.resetToken,
+            input.token,
+          ),
+        )
+        .limit(1);
 
-      const user =
-        result[0];
+      const user = result[0];
 
       if (
         !user ||
         !user.resetTokenExpiry
       ) {
         throw new TRPCError({
-          code:
-            "NOT_FOUND",
+          code: "NOT_FOUND",
           message:
             "Invalid or expired reset link.",
         });
@@ -1555,8 +1275,7 @@ export const authRouter = router({
         )
       ) {
         throw new TRPCError({
-          code:
-            "BAD_REQUEST",
+          code: "BAD_REQUEST",
           message:
             "This reset link has expired. Please request a new one.",
         });
@@ -1571,28 +1290,15 @@ export const authRouter = router({
       await db
         .update(users)
         .set({
-          passwordHash:
-            newHash,
-
-          resetToken:
-            null,
-
-          resetTokenExpiry:
-            null,
-
-          lastSignedIn:
-            new Date(),
+          passwordHash: newHash,
+          resetToken: null,
+          resetTokenExpiry: null,
+          lastSignedIn: new Date(),
         })
-        .where(
-          eq(
-            users.id,
-            user.id,
-          ),
-        );
+        .where(eq(users.id, user.id));
 
       return {
-        success:
-          true,
+        success: true,
       };
     }),
 
@@ -1606,48 +1312,41 @@ export const authRouter = router({
         currentPassword:
           z.string().min(1),
 
-        newPassword:
-          z.string()
-            .min(8)
-            .max(128),
+        newPassword: z
+          .string()
+          .min(8)
+          .max(128),
       }),
     )
     .mutation(async ({ input, ctx }) => {
-
-      const db =
-        await getDb();
+      const db = await getDb();
 
       if (!db) {
         throw new TRPCError({
-          code:
-            "INTERNAL_SERVER_ERROR",
-          message:
-            "Database unavailable.",
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Database unavailable.",
         });
       }
 
-      const result =
-        await db
-          .select()
-          .from(users)
-          .where(
-            eq(
-              users.id,
-              ctx.user.id,
-            ),
-          )
-          .limit(1);
+      const result = await db
+        .select()
+        .from(users)
+        .where(
+          eq(
+            users.id,
+            ctx.user.id,
+          ),
+        )
+        .limit(1);
 
-      const user =
-        result[0];
+      const user = result[0];
 
       if (
         !user ||
         !user.passwordHash
       ) {
         throw new TRPCError({
-          code:
-            "BAD_REQUEST",
+          code: "BAD_REQUEST",
           message:
             "No password is set on this account.",
         });
@@ -1661,8 +1360,7 @@ export const authRouter = router({
 
       if (!valid) {
         throw new TRPCError({
-          code:
-            "UNAUTHORIZED",
+          code: "UNAUTHORIZED",
           message:
             "Current password is incorrect.",
         });
@@ -1677,8 +1375,7 @@ export const authRouter = router({
       await db
         .update(users)
         .set({
-          passwordHash:
-            newHash,
+          passwordHash: newHash,
         })
         .where(
           eq(
@@ -1688,8 +1385,7 @@ export const authRouter = router({
         );
 
       return {
-        success:
-          true,
+        success: true,
       };
     }),
 });
