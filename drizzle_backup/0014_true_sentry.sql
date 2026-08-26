@@ -1,0 +1,1 @@
+ALTER TABLE `organizations` ADD `themePalette` enum('forest_slate','charcoal_sapphire','graphite_amber','stone_cobalt','midnight_teal','plum_lilac') DEFAULT 'forest_slate' NOT NULL;
